@@ -825,7 +825,14 @@ INDEX_HTML_CONTENT = """<!DOCTYPE html>
 @app.get("/", response_class=HTMLResponse, summary="Web Interface")
 def get_root():
     """Serves the modern, clean web interface."""
-    return HTMLResponse(content=INDEX_HTML_CONTENT)
+    return HTMLResponse(
+        content=INDEX_HTML_CONTENT,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        }
+    )
 
 
 @app.get("/api", summary="API Information")
