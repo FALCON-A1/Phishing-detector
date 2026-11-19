@@ -21,6 +21,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Note: datasets are excluded via .dockerignore
 COPY feature_extractor.py .
 COPY app.py .
+COPY index.html .
 COPY model.joblib .
 
 # Expose default port

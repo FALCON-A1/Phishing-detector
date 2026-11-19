@@ -12,11 +12,13 @@ from typing import Dict, List, Optional, Any
 
 import joblib
 import numpy as np
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 # Ensure project root is in path
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+INDEX_HTML_PATH = os.path.join(CURRENT_DIR, "index.html")
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
 
@@ -214,9 +216,20 @@ def classify_url(url: str) -> PredictResponse:
     )
 
 
-@app.get("/", summary="API Information")
-def get_root():
-    """Information endpoint providing API metadata and links."""
+@app.get("/", summary="Web Interface and API Information")
+def get_root(request: Request):
+    """
+    Serves the modern, clean web interface for browsers,
+    or JSON metadata for programmatic API clients.
+    """
+    accept = request.headers.get("accept", "")
+    # Serve HTML UI to browsers
+    if "text/html" in accept and not accept.startswith("*/*"):
+        if os.path.exists(INDEX_HTML_PATH):
+            with open(INDEX_HTML_PATH, "r", encoding="utf-8") as f:
+                return HTMLResponse(content=f.read())
+
+    # Fallback to JSON API metadata
     return {
         "name": "URL Phishing Detector API",
         "version": MODEL_STATE["version"],
@@ -224,6 +237,7 @@ def get_root():
         "description": "High-performance, lightweight URL phishing and typosquatting detector.",
         "model_loaded": MODEL_STATE["loaded"],
         "endpoints": {
+            "web_ui": "/",
             "health": "/health",
             "predict": "/predict",
             "docs": "/docs"
