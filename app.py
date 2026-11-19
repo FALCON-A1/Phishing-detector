@@ -24,7 +24,8 @@ if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
 
 from feature_extractor import (
-    extract_features, extract_features_vector, FEATURE_NAMES
+    extract_features, extract_features_vector, FEATURE_NAMES,
+    parse_url_components, detect_brand_lookalike
 )
 
 # Global model state
@@ -151,7 +152,8 @@ TRUSTED_DOMAINS = {
     "google.com", "youtube.com", "microsoft.com", "amazon.com", "apple.com",
     "wikipedia.org", "github.com", "facebook.com", "stackoverflow.com",
     "linkedin.com", "twitter.com", "x.com", "instagram.com", "netflix.com",
-    "vodafone.com.eg", "vf.eg"
+    "vodafone.com.eg", "vf.eg", "paypal.com", "yahoo.com", "spotify.com",
+    "whatsapp.com", "tiktok.com", "dropbox.com", "ebay.com", "walmart.com"
 }
 
 def classify_url(url: str) -> PredictResponse:
@@ -182,7 +184,11 @@ def classify_url(url: str) -> PredictResponse:
 
     # 4. Extract explainable security indicators
     reasons: List[str] = []
-    is_lookalike = feats_dict["is_brand_lookalike"] > 0
+    lookalike_info = detect_brand_lookalike(url)
+    is_lookalike = (feats_dict["is_brand_lookalike"] > 0) or (lookalike_info is not None)
+    target_brand = lookalike_info[0] if lookalike_info else None
+    target_token = lookalike_info[1] if lookalike_info else None
+
     brand_in_sub = feats_dict["brand_in_subdomain_or_path"] > 0
     has_ip = feats_dict["has_ip"] > 0
     kw_cnt = int(feats_dict["suspicious_keyword_count"])
@@ -193,7 +199,6 @@ def classify_url(url: str) -> PredictResponse:
     has_redirect = feats_dict["has_double_slash_redirect"] > 0
 
     # Parse components for domain verification
-    from feature_extractor import parse_url_components
     scheme, full_dom, sld, tld, path, query = parse_url_components(url)
     is_trusted = any(full_dom == d or full_dom.endswith("." + d) for d in TRUSTED_DOMAINS)
 
@@ -202,12 +207,16 @@ def classify_url(url: str) -> PredictResponse:
             url=url,
             prediction="Safe",
             confidence=0.98,
-            risk_score=round(prob, 4),
-            reasons=["Verified legitimate authority domain with valid SSL"]
+            risk_score=min(round(prob, 4), 0.04),
+            reasons=["Verified legitimate authority domain with valid SSL certificate"]
         )
 
     if is_lookalike:
-        reasons.append("Typosquatting/lookalike domain pattern targeting a well-known brand")
+        if target_brand and target_token:
+            reasons.append(f"Visual typosquatting / lookalike pattern detected targeting '{target_brand}' ('{target_token}')")
+        else:
+            reasons.append("Typosquatting/lookalike domain pattern targeting a well-known brand")
+
     if brand_in_sub:
         reasons.append("Brand impersonation detected in subdomain or path")
     if has_homoglyphs:
@@ -229,28 +238,47 @@ def classify_url(url: str) -> PredictResponse:
     t_safe = thresholds.get("safe_max", 0.30)
     t_phish = thresholds.get("phish_min", 0.65)
 
-    # 5. Determine 3-Level classification adhering strictly to Section 8 rules
+    # 5. Determine 3-Level classification adhering strictly to Section 7 & 8 rules
     has_indicators = len(reasons) > 0
+    has_harvesting_risk = (
+        kw_cnt > 0 or scheme == "http" or brand_in_sub or has_ip or
+        susp_tld or has_redirect or has_at or has_homoglyphs or prob >= 0.50
+    )
 
-    if prob >= t_phish and has_indicators:
+    if is_lookalike:
+        if has_harvesting_risk:
+            prediction = "Phishing"
+            confidence = max(prob, 0.88)
+            calibrated_risk = max(prob, 0.85)
+            reasons.append(f"High risk: brand lookalike targeting '{target_brand or 'brand'}' with active harvesting/insecure indicators")
+        else:
+            prediction = "Suspicious"
+            confidence = 0.85
+            calibrated_risk = max(prob, 0.62)
+            reasons.append(f"Suspicious lookalike domain: closely mimics '{target_brand or 'brand'}'; verify authenticity before entering credentials")
+    elif prob >= t_phish and has_indicators:
         prediction = "Phishing"
         confidence = prob
+        calibrated_risk = prob
         reasons.append(f"Model phishing risk is high ({prob * 100:.1f}%) with supporting malicious patterns")
-    elif is_lookalike or brand_in_sub or (has_ip and kw_cnt > 0) or has_homoglyphs:
+    elif brand_in_sub or (has_ip and kw_cnt > 0) or has_homoglyphs:
         prediction = "Suspicious" if prob < 0.60 else "Phishing"
         confidence = max(prob, 0.75)
+        calibrated_risk = max(prob, 0.65)
     elif prob >= t_phish and not has_indicators:
-        # High model score without specific malicious patterns -> Suspicious per Section 8
         prediction = "Suspicious"
         confidence = prob
+        calibrated_risk = prob
         reasons.append(f"Elevated statistical risk ({prob * 100:.1f}%) but no confirmed malicious patterns detected; proceed with caution")
     elif prob >= t_safe:
         prediction = "Suspicious"
         confidence = prob
+        calibrated_risk = prob
         reasons.append(f"Moderate risk score ({prob * 100:.1f}%) with ambiguous characteristics")
     else:
         prediction = "Safe"
         confidence = 1.0 - prob
+        calibrated_risk = prob
         if not reasons:
             reasons.append("No significant suspicious URL patterns or brand impersonation detected")
 
@@ -258,7 +286,7 @@ def classify_url(url: str) -> PredictResponse:
         url=url,
         prediction=prediction,
         confidence=round(confidence, 4),
-        risk_score=round(prob, 4),
+        risk_score=round(calibrated_risk, 4),
         reasons=reasons
     )
 

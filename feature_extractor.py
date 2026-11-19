@@ -8,16 +8,17 @@ import math
 import re
 import urllib.parse
 from collections import Counter
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 
 # Top targeted brands commonly spoofed in phishing attacks
 TARGET_BRANDS = [
-    "google", "apple", "microsoft", "amazon", "paypal", "facebook",
-    "netflix", "yahoo", "twitter", "linkedin", "instagram", "dropbox",
+    "google", "youtube", "microsoft", "apple", "amazon", "paypal", "facebook",
+    "meta", "netflix", "yahoo", "twitter", "linkedin", "instagram", "dropbox",
     "github", "whatsapp", "telegram", "chase", "wellsfargo", "bankofamerica",
     "citi", "binance", "coinbase", "metamask", "steam", "spotify",
     "roblox", "tiktok", "outlook", "icloud", "adobe", "walmart",
-    "ebay", "dhl", "fedex", "usps"
+    "ebay", "dhl", "fedex", "usps", "stripe", "university", "college",
+    "campus", "vodafone"
 ]
 
 # High-risk TLDs frequently abused in malicious campaigns
@@ -33,7 +34,8 @@ SUSPICIOUS_KEYWORDS = [
     "secure", "security", "update", "confirm", "confirmation", "wallet",
     "admin", "service", "support", "password", "credential", "auth",
     "recover", "billing", "ebayisapi", "webscr", "cmd", "session",
-    "suspended", "unlock", "alert", "validate", "renew"
+    "suspended", "unlock", "alert", "validate", "renew", "portal",
+    "webmail", "student", "office", "invoice", "payment"
 ]
 
 # Suspicious executable or script file extensions
@@ -181,20 +183,23 @@ def extract_typosquatting_indicators(full_domain: str, sld: str, path: str) -> D
     """
     Extract typosquatting, brand impersonation, and homoglyph metrics.
     """
-    norm_sld = normalize_substitutions(sld)
     has_punycode = 1 if "xn--" in full_domain else 0
     homoglyph_count = detect_homoglyphs(full_domain)
-    # Strip standard www. prefix to avoid measuring www as 3-char repetition
     clean_dom = full_domain[4:] if full_domain.startswith("www.") else full_domain
     max_rep = max_char_repetition(clean_dom)
 
     min_edit_dist = 99
-    closest_brand = ""
     is_brand_lookalike = 0
     brand_in_sub_or_path = 0
 
     lower_full = full_domain.lower()
     lower_path = path.lower()
+
+    # Domain tokens for combosquatting / hyphenation lookalikes (e.g. login-paypol, youtobe-video)
+    tokens = set(re.split(r"[-_.]", sld))
+    tokens.add(sld)
+    if clean_dom:
+        tokens.add(clean_dom)
 
     for brand in TARGET_BRANDS:
         # Check brand in subdomain or path when the registered domain is NOT that brand
@@ -202,19 +207,24 @@ def extract_typosquatting_indicators(full_domain: str, sld: str, path: str) -> D
             if sld != brand:
                 brand_in_sub_or_path = 1
 
-        # Check lookalike distance
-        dist = levenshtein_distance(sld, brand)
-        if dist < min_edit_dist:
-            min_edit_dist = dist
-            closest_brand = brand
+        for t in tokens:
+            if not t or t == brand:
+                continue
+            norm_t = normalize_substitutions(t)
+            dist = levenshtein_distance(t, brand)
+            norm_dist = levenshtein_distance(norm_t, brand)
+            effective_dist = min(dist, norm_dist)
 
-        # Check leetspeak match (e.g. paypa1 -> paypal, amaz0n -> amazon)
-        if sld != brand:
-            if norm_sld == brand:
+            if effective_dist < min_edit_dist:
+                min_edit_dist = effective_dist
+
+            if norm_t == brand:
                 is_brand_lookalike = 1
-            elif len(sld) >= 4 and dist <= 1:
+            elif len(brand) <= 4 and effective_dist <= 1 and abs(len(t) - len(brand)) <= 1:
                 is_brand_lookalike = 1
-            elif len(sld) >= 6 and dist == 2 and not sld.startswith(brand):
+            elif len(brand) > 4 and effective_dist <= 1:
+                is_brand_lookalike = 1
+            elif len(brand) >= 6 and effective_dist == 2 and abs(len(t) - len(brand)) <= 1:
                 is_brand_lookalike = 1
 
     return {
@@ -225,6 +235,51 @@ def extract_typosquatting_indicators(full_domain: str, sld: str, path: str) -> D
         "has_punycode": float(has_punycode),
         "has_homoglyphs": float(1 if homoglyph_count > 0 else 0)
     }
+
+
+def detect_brand_lookalike(url: str) -> Optional[Tuple[str, str, int]]:
+    """
+    Detailed helper for API explainability: returns (brand, matched_token, edit_distance)
+    if typosquatting/lookalike is detected, else None.
+    """
+    scheme, full_domain, sld, tld, path, query = parse_url_components(url)
+    clean_dom = full_domain[4:] if full_domain.startswith("www.") else full_domain
+
+    tokens = set(re.split(r"[-_.]", sld))
+    tokens.add(sld)
+    if clean_dom:
+        tokens.add(clean_dom)
+    raw_clean = url.strip().lower()
+    if raw_clean:
+        tokens.add(raw_clean)
+
+    best_match = None
+    min_dist = 99
+
+    for brand in TARGET_BRANDS:
+        for t in tokens:
+            if not t or t == brand:
+                continue
+            norm_t = normalize_substitutions(t)
+            dist = levenshtein_distance(t, brand)
+            norm_dist = levenshtein_distance(norm_t, brand)
+            effective_dist = min(dist, norm_dist)
+
+            is_match = False
+            if norm_t == brand:
+                is_match = True
+            elif len(brand) <= 4 and effective_dist <= 1 and abs(len(t) - len(brand)) <= 1:
+                is_match = True
+            elif len(brand) > 4 and effective_dist <= 1:
+                is_match = True
+            elif len(brand) >= 6 and effective_dist == 2 and abs(len(t) - len(brand)) <= 1:
+                is_match = True
+
+            if is_match and effective_dist < min_dist:
+                min_dist = effective_dist
+                best_match = (brand, t, effective_dist)
+
+    return best_match
 
 
 def extract_features(url: str) -> Dict[str, float]:
