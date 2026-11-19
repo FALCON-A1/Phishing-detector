@@ -24,8 +24,9 @@ COPY app.py .
 COPY index.html .
 COPY model.joblib .
 
-# Expose default port
+# Expose default ports
 EXPOSE 8000
+EXPOSE 8080
 
 # Container healthcheck
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

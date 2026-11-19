@@ -4,6 +4,7 @@ Provides / , /health, and /predict endpoints with 3-level classification:
 Safe, Suspicious, or Phishing.
 """
 
+import asyncio
 import os
 import sys
 import time
@@ -66,10 +67,56 @@ def load_model_artifact(model_path: str = "model.joblib") -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load model once on application startup."""
+    """Load model once on application startup and bridge alternate Railway ports."""
     model_env_path = os.environ.get("MODEL_PATH", "model.joblib")
     load_model_artifact(model_env_path)
+
+    # Railway port bridge: ensure both port 8000 and 8080 respond cleanly
+    current_port = int(os.environ.get("PORT", 8000))
+    aux_ports = [p for p in (8000, 8080) if p != current_port]
+    aux_servers = []
+
+    async def forward_connection(reader, writer, target_port):
+        try:
+            t_reader, t_writer = await asyncio.open_connection("127.0.0.1", target_port)
+            async def pipe(r, w):
+                try:
+                    while not r.at_eof():
+                        data = await r.read(65536)
+                        if not data:
+                            break
+                        w.write(data)
+                        await w.drain()
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        w.close()
+                    except Exception:
+                        pass
+            await asyncio.gather(pipe(reader, t_writer), pipe(t_reader, writer))
+        except Exception:
+            try:
+                writer.close()
+            except Exception:
+                pass
+
+    for aux_port in aux_ports:
+        try:
+            srv = await asyncio.start_server(
+                lambda r, w, tp=current_port: forward_connection(r, w, tp),
+                "0.0.0.0",
+                aux_port
+            )
+            aux_servers.append(srv)
+            print(f"Dual-port bridge active: forwarding 0.0.0.0:{aux_port} -> 127.0.0.1:{current_port}")
+        except Exception as e:
+            print(f"Auxiliary port {aux_port} bridge skipped: {e}")
+
     yield
+
+    for srv in aux_servers:
+        srv.close()
 
 
 app = FastAPI(
