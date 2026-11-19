@@ -1,0 +1,11 @@
+Datasets/
+datasets/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.git/
+.gitignore
+scratch/
+*.whl
+*.bin
