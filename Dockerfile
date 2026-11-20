@@ -14,9 +14,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application and trained model artifact
 # Note: datasets are excluded via .dockerignore
 COPY feature_extractor.py .
+COPY spam_detector.py .
 COPY app.py .
 COPY index.html .
 COPY model.joblib .
+COPY spam_model.joblib .
 
 # Expose ports
 EXPOSE 8000
